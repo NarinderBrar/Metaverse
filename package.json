@@ -1,0 +1,26 @@
+{
+  "name": "multiplayer-cube-world",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:client": "vite",
+    "dev:server": "partykit dev",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "deploy:server": "partykit deploy"
+  },
+  "dependencies": {
+    "partysocket": "latest",
+    "three": "latest"
+  },
+  "devDependencies": {
+    "@types/three": "latest",
+    "concurrently": "latest",
+    "partykit": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}

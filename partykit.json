@@ -1,0 +1,6 @@
+{
+  "$schema": "https://www.partykit.io/schema.json",
+  "name": "multiplayer-cube-world",
+  "main": "server/server.ts",
+  "compatibilityDate": "2026-07-18"
+}
