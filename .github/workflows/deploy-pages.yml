@@ -33,7 +33,7 @@ jobs:
       - name: Build application
         run: npm run build
         env:
-          VITE_PARTYKIT_HOST: multiplayer-cube-world.narinderbrar.partykit.dev
+          VITE_SOCKET_SERVER_URL: ${{ vars.VITE_SOCKET_SERVER_URL }}
 
       - name: Upload GitHub Pages artifact
         uses: actions/upload-pages-artifact@v3

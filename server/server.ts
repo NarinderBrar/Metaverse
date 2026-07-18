@@ -1,4 +1,5 @@
-import type * as Party from "partykit/server";
+import { createServer } from "node:http";
+import { Server as SocketIOServer, type Socket } from "socket.io";
 import {
   MOVE_SPEED,
   WINNING_SCORE,
@@ -13,6 +14,17 @@ import {
   type ServerMessage,
 } from "../src/shared/protocol";
 
+interface ClientToServerEvents {
+  "client-message": (raw: string) => void;
+}
+
+interface ServerToClientEvents {
+  "server-message": (raw: string) => void;
+}
+
+type GameSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
+type GameIO = SocketIOServer<ClientToServerEvents, ServerToClientEvents>;
+
 const COLORS = [0x67e8f9, 0x818cf8, 0xe879f9, 0xfb7185, 0xfbbf24, 0x4ade80, 0xf97316, 0xa3e635];
 const MATERIALS: MaterialKind[] = ["glass", "rubber", "wood", "metal", "ceramic", "crystal"];
 const SPAWNS = [[0, 0], [4, 0], [-4, 0], [0, 4], [0, -4], [4, 4], [-4, -4], [4, -4], [-4, 4]] as const;
@@ -24,13 +36,11 @@ const DROP_COLLECT_RADIUS = 1.05;
 const PROJECTILE_SPEED = 7.5;
 const MAX_PROJECTILES = 14;
 
-export default class CubeWorldRoom implements Party.Server {
+class CubeWorldServer {
   private readonly players = new Map<string, PlayerState>();
   private readonly lastSequences = new Map<string, number>();
   private readonly drops = new Map<string, DropState>();
   private readonly projectiles = new Map<string, ProjectileState>();
-  private rosterTimer?: ReturnType<typeof setInterval>;
-  private simulationTimer?: ReturnType<typeof setInterval>;
   private roundResetTimer?: ReturnType<typeof setTimeout>;
   private roundId = 1;
   private objectCounter = 0;
@@ -38,59 +48,54 @@ export default class CubeWorldRoom implements Party.Server {
   private nextProjectileAt = Date.now() + 1200;
   private winnerId: string | null = null;
 
-  constructor(readonly room: Party.Room) {}
-
-  onStart(): void {
+  constructor(private readonly io: GameIO) {
     this.fillDrops();
-    this.rosterTimer = setInterval(() => this.broadcast({ type: "roster", players: [...this.players.values()] }), 5000);
-    this.simulationTimer = setInterval(() => this.simulate(), 50);
+    setInterval(() => this.broadcast({ type: "roster", players: [...this.players.values()] }), 5000);
+    setInterval(() => this.simulate(), 50);
   }
 
-  onConnect(): void {
-    // Players become visible only after sending a valid join message.
+  connect(socket: GameSocket): void {
+    socket.on("client-message", (raw) => this.onMessage(raw, socket));
+    socket.on("disconnect", () => this.onClose(socket.id));
   }
 
-  onMessage(raw: string | ArrayBuffer, sender: Party.Connection): void {
+  private onMessage(raw: string, socket: GameSocket): void {
     if (typeof raw !== "string") return;
     const message = parseClientMessage(raw);
     if (!message) return;
 
-    if (message.type === "join") this.handleJoin(sender, message.name);
-    if (message.type === "move") this.handleMove(sender, message);
-    if (message.type === "respawn") this.handleRespawn(sender);
+    if (message.type === "join") this.handleJoin(socket, message.name);
+    if (message.type === "move") this.handleMove(socket, message);
+    if (message.type === "respawn") this.handleRespawn(socket);
     if (message.type === "ping") {
-      this.send(sender, { type: "pong", clientTime: message.clientTime, serverTime: Date.now() });
+      this.send(socket, { type: "pong", clientTime: message.clientTime, serverTime: Date.now() });
     }
   }
 
-  onClose(connection: Party.Connection): void {
-    if (!this.players.delete(connection.id)) return;
-    this.lastSequences.delete(connection.id);
-    this.broadcast({ type: "player-left", playerId: connection.id });
+  private onClose(socketId: string): void {
+    if (!this.players.delete(socketId)) return;
+    this.lastSequences.delete(socketId);
+    this.broadcast({ type: "player-left", playerId: socketId });
   }
 
-  onError(connection: Party.Connection): void {
-    this.onClose(connection);
-  }
-
-  private handleJoin(connection: Party.Connection, rawName: string): void {
-    if (this.players.has(connection.id)) return;
+  private handleJoin(socket: GameSocket, rawName: string): void {
+    if (this.players.has(socket.id)) return;
     if (this.players.size >= MAX_PLAYERS) {
-      this.send(connection, { type: "error", code: "room-full", message: "This world is full." });
-      connection.close(1008, "Room full");
+      this.send(socket, { type: "error", code: "room-full", message: "This world is full." });
+      socket.disconnect(true);
       return;
     }
 
     const name = rawName.replace(/[\u0000-\u001f\u007f<>]/g, "").trim().slice(0, 20);
     if (name.length < 2) {
-      this.send(connection, { type: "error", code: "invalid-name", message: "Use a name with 2–20 characters." });
+      this.send(socket, { type: "error", code: "invalid-name", message: "Use a name with 2–20 characters." });
       return;
     }
 
     const [x, z] = this.findSpawn();
-    const playerHash = this.hash(connection.id);
+    const playerHash = this.hash(socket.id);
     const player: PlayerState = {
-      id: connection.id,
+      id: socket.id,
       name,
       x,
       z,
@@ -101,16 +106,16 @@ export default class CubeWorldRoom implements Party.Server {
       alive: true,
       updatedAt: Date.now(),
     };
-    this.players.set(connection.id, player);
-    this.lastSequences.set(connection.id, 0);
-    this.send(connection, { type: "welcome", playerId: connection.id, players: [...this.players.values()], game: this.gameState() });
-    this.broadcast({ type: "player-joined", player }, [connection.id]);
+    this.players.set(socket.id, player);
+    this.lastSequences.set(socket.id, 0);
+    this.send(socket, { type: "welcome", playerId: socket.id, players: [...this.players.values()], game: this.gameState() });
+    this.broadcast({ type: "player-joined", player }, [socket.id]);
   }
 
-  private handleMove(connection: Party.Connection, message: Extract<ClientMessage, { type: "move" }>): void {
-    const player = this.players.get(connection.id);
+  private handleMove(socket: GameSocket, message: Extract<ClientMessage, { type: "move" }>): void {
+    const player = this.players.get(socket.id);
     if (!player || !player.alive || this.winnerId) return;
-    const lastSequence = this.lastSequences.get(connection.id) ?? 0;
+    const lastSequence = this.lastSequences.get(socket.id) ?? 0;
     if (message.sequence <= lastSequence) return;
 
     const now = Date.now();
@@ -129,17 +134,17 @@ export default class CubeWorldRoom implements Party.Server {
     }
 
     Object.assign(player, { x, z, rotationY: message.rotationY, updatedAt: now });
-    this.lastSequences.set(connection.id, message.sequence);
-    this.broadcast({ type: "player-moved", playerId: connection.id, sequence: message.sequence, x, z, rotationY: message.rotationY, serverTime: now });
+    this.lastSequences.set(socket.id, message.sequence);
+    this.broadcast({ type: "player-moved", playerId: socket.id, sequence: message.sequence, x, z, rotationY: message.rotationY, serverTime: now });
     this.checkDropCollection(player);
   }
 
-  private handleRespawn(connection: Party.Connection): void {
-    const player = this.players.get(connection.id);
+  private handleRespawn(socket: GameSocket): void {
+    const player = this.players.get(socket.id);
     if (!player || player.alive || this.winnerId) return;
     const [x, z] = this.findSpawn();
     Object.assign(player, { x, z, rotationY: 0, score: 0, alive: true, updatedAt: Date.now() });
-    this.lastSequences.set(connection.id, 0);
+    this.lastSequences.set(socket.id, 0);
     this.broadcast({ type: "player-respawned", player });
   }
 
@@ -262,11 +267,40 @@ export default class CubeWorldRoom implements Party.Server {
     return Math.abs(hash);
   }
 
-  private send(connection: Party.Connection, message: ServerMessage): void {
-    connection.send(JSON.stringify(message));
+  private send(socket: GameSocket, message: ServerMessage): void {
+    socket.emit("server-message", JSON.stringify(message));
   }
 
   private broadcast(message: ServerMessage, exclude?: string[]): void {
-    this.room.broadcast(JSON.stringify(message), exclude);
+    const payload = JSON.stringify(message);
+    if (exclude?.length) this.io.except(exclude).emit("server-message", payload);
+    else this.io.emit("server-message", payload);
   }
 }
+
+const allowedOrigins = (process.env.CLIENT_ORIGINS ?? "http://localhost:5173,https://narinderbrar.github.io")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const httpServer = createServer((request, response) => {
+  if (request.url === "/" || request.url === "/health") {
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({ status: "ok", service: "cube-world-socket-server" }));
+    return;
+  }
+  response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify({ error: "not-found" }));
+});
+
+const io = new SocketIOServer<ClientToServerEvents, ServerToClientEvents>(httpServer, {
+  cors: { origin: allowedOrigins, methods: ["GET", "POST"] },
+  transports: ["websocket"],
+});
+const game = new CubeWorldServer(io);
+io.on("connection", (socket) => game.connect(socket));
+
+const port = Number(process.env.PORT ?? 3000);
+httpServer.listen(port, "0.0.0.0", () => {
+  console.log(`Cube World Socket.IO server listening on port ${port}`);
+});

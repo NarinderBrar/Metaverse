@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: cube-world-socket-server
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: CLIENT_ORIGINS
+        value: https://narinderbrar.github.io,http://localhost:5173

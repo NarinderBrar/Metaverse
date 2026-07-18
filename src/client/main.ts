@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import PartySocket from "partysocket";
+import { io, type Socket } from "socket.io-client";
 import {
   MOVE_SPEED,
   WINNING_SCORE,
@@ -46,7 +46,15 @@ const drops = new Map<string, DropEntity>();
 const projectiles = new Map<string, ProjectileEntity>();
 const keys = new Set<string>();
 const clock = new THREE.Clock();
-let socket: PartySocket | null = null;
+interface ServerToClientEvents {
+  "server-message": (raw: string) => void;
+}
+
+interface ClientToServerEvents {
+  "client-message": (raw: string) => void;
+}
+
+let socket: Socket<ServerToClientEvents, ClientToServerEvents> | null = null;
 let localId = "";
 let displayName = "";
 let sequence = 0;
@@ -83,29 +91,32 @@ joinForm.addEventListener("submit", (event) => {
 });
 
 respawnButton.addEventListener("click", () => {
-  socket?.send(JSON.stringify({ type: "respawn" }));
+  sendMessage({ type: "respawn" });
   respawnButton.disabled = true;
   respawnButton.textContent = "Re-entering…";
 });
 
 function connect(): void {
   setStatus("connecting", "Connecting…");
-  const configuredHost = import.meta.env.VITE_PARTYKIT_HOST as string | undefined;
-  socket = new PartySocket({ host: configuredHost || `${location.hostname}:1999`, room: "lobby" });
-  socket.addEventListener("open", () => {
+  const serverUrl = (import.meta.env.VITE_SOCKET_SERVER_URL as string | undefined) || "http://localhost:3000";
+  socket = io(serverUrl, { transports: ["websocket"], reconnection: true });
+  socket.on("connect", () => {
     setStatus("connected", "Connected");
-    socket?.send(JSON.stringify({ type: "join", name: displayName }));
+    sendMessage({ type: "join", name: displayName });
   });
-  socket.addEventListener("message", (event) => {
-    if (typeof event.data !== "string") return;
-    const message = parseServerMessage(event.data);
+  socket.on("server-message", (raw) => {
+    const message = parseServerMessage(raw);
     if (message) {
       messagesReceived += 1;
       routeMessage(message);
     }
   });
-  socket.addEventListener("close", () => setStatus("connecting", "Reconnecting…"));
-  socket.addEventListener("error", () => setStatus("error", "Connection issue"));
+  socket.on("disconnect", () => setStatus("connecting", "Reconnecting…"));
+  socket.on("connect_error", () => setStatus("error", "Connection issue"));
+}
+
+function sendMessage(message: import("../shared/protocol").ClientMessage): void {
+  socket?.emit("client-message", JSON.stringify(message));
 }
 
 function routeMessage(message: ServerMessage): void {
@@ -293,8 +304,8 @@ function updateLocal(delta: number, now: number): void {
     player.root.position.z = THREE.MathUtils.clamp(player.root.position.z, -WORLD_LIMIT + 0.6, WORLD_LIMIT - 0.6);
     player.root.rotation.y = Math.atan2(direction.x, direction.z);
   }
-  if (now - lastSent >= 100 && player.root.position.distanceToSquared(lastPosition) > 0.0001 && socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({ type: "move", sequence: ++sequence, x: player.root.position.x, z: player.root.position.z, rotationY: player.root.rotation.y }));
+  if (now - lastSent >= 100 && player.root.position.distanceToSquared(lastPosition) > 0.0001 && socket?.connected) {
+    sendMessage({ type: "move", sequence: ++sequence, x: player.root.position.x, z: player.root.position.z, rotationY: player.root.rotation.y });
     messagesSent += 1;
     lastPosition.copy(player.root.position);
     lastSent = now;
@@ -318,7 +329,7 @@ function animate(now = performance.now()): void {
 animate();
 
 setInterval(() => {
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "ping", clientTime: Date.now() }));
+  if (socket?.connected) sendMessage({ type: "ping", clientTime: Date.now() });
 }, 5000);
 
 function updateHud(): void {
