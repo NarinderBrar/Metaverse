@@ -45,10 +45,10 @@ Render supplies the `PORT` environment variable automatically. The server binds 
 
 ### Three.js client on GitHub Pages
 
-Add the Render service URL as a GitHub Actions repository variable:
+The production workflow connects to the deployed Render service:
 
 ```text
-VITE_SOCKET_SERVER_URL=https://your-service.onrender.com
+VITE_SOCKET_SERVER_URL=https://cube-world-socket-server.onrender.com
 ```
 
 The workflow in `.github/workflows/deploy-pages.yml` builds and publishes the client. It runs automatically on pushes to `main`.

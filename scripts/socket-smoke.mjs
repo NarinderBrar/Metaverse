@@ -2,18 +2,19 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { io } from "socket.io-client";
 
+const externalServerUrl = process.env.SOCKET_SERVER_URL;
 const port = 3100;
-const serverUrl = `http://127.0.0.1:${port}`;
+const serverUrl = externalServerUrl || `http://127.0.0.1:${port}`;
 const tsxCli = fileURLToPath(new URL("../node_modules/tsx/dist/cli.mjs", import.meta.url));
-const server = spawn(process.execPath, [tsxCli, "server/server.ts"], {
-  cwd: fileURLToPath(new URL("..", import.meta.url)),
-  env: { ...process.env, PORT: String(port), CLIENT_ORIGINS: "http://localhost:5173" },
-  stdio: ["ignore", "pipe", "pipe"],
-});
+const server = externalServerUrl ? null : spawn(process.execPath, [tsxCli, "server/server.ts"], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    env: { ...process.env, PORT: String(port), CLIENT_ORIGINS: "http://localhost:5173" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 
 let serverOutput = "";
-server.stdout.on("data", (chunk) => { serverOutput += chunk; });
-server.stderr.on("data", (chunk) => { serverOutput += chunk; });
+server?.stdout.on("data", (chunk) => { serverOutput += chunk; });
+server?.stderr.on("data", (chunk) => { serverOutput += chunk; });
 
 function waitForMessage(socket, predicate, timeout = 3000) {
   return new Promise((resolve, reject) => {
@@ -78,5 +79,5 @@ try {
   console.log("Socket.IO smoke test passed: health, two joins, movement broadcast, and ping.");
 } finally {
   clients.forEach((socket) => socket.disconnect());
-  server.kill();
+  server?.kill();
 }
