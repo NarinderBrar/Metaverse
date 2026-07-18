@@ -35,6 +35,12 @@ app.innerHTML = `
   </header>
   <aside class="scoreboard hidden" id="scoreboard"><div class="scoreboard-title"><span>Leaderboard</span><small>First to ${WINNING_SCORE}</small></div><div id="scoreboard-list"></div></aside>
   <aside class="controls hidden" id="controls"><div class="keys"><kbd>W</kbd><div><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></div></div><div><strong>Move & dodge</strong><span>Collect blue water drops</span></div></aside>
+  <aside class="mobile-controls hidden" id="mobile-controls" aria-label="Touch movement controls">
+    <div class="joystick" id="movement-joystick" aria-label="Drag to move">
+      <div class="joystick-knob" id="joystick-knob"></div>
+    </div>
+    <span>Drag to move</span>
+  </aside>
   <section class="game-overlay hidden" id="game-overlay"><div class="result-card"><div class="result-icon" id="result-icon">!</div><div class="eyebrow" id="result-eyebrow">Round over</div><h2 id="result-title">You were hit</h2><p id="result-copy">Your score was reset. Jump back in when you are ready.</p><button id="respawn-button">Re-enter arena <span>&rarr;</span></button></div></section>
   <div class="toast" id="toast"></div>`;
 
@@ -46,6 +52,8 @@ const drops = new Map<string, DropEntity>();
 const projectiles = new Map<string, ProjectileEntity>();
 const keys = new Set<string>();
 const clock = new THREE.Clock();
+const movementDirection = new THREE.Vector3();
+const touchMovement = new THREE.Vector2();
 interface ServerToClientEvents {
   "server-message": (raw: string) => void;
 }
@@ -71,6 +79,9 @@ const nameInput = document.querySelector<HTMLInputElement>("#name")!;
 const formError = document.querySelector<HTMLElement>("#form-error")!;
 const hud = document.querySelector<HTMLElement>("#hud")!;
 const controls = document.querySelector<HTMLElement>("#controls")!;
+const mobileControls = document.querySelector<HTMLElement>("#mobile-controls")!;
+const movementJoystick = document.querySelector<HTMLElement>("#movement-joystick")!;
+const joystickKnob = document.querySelector<HTMLElement>("#joystick-knob")!;
 const scoreboard = document.querySelector<HTMLElement>("#scoreboard")!;
 const gameOverlay = document.querySelector<HTMLElement>("#game-overlay")!;
 const respawnButton = document.querySelector<HTMLButtonElement>("#respawn-button")!;
@@ -133,6 +144,7 @@ function routeMessage(message: ServerMessage): void {
     joinPanel.classList.add("leaving");
     hud.classList.remove("hidden");
     controls.classList.remove("hidden");
+    mobileControls.classList.remove("hidden");
     scoreboard.classList.remove("hidden");
     setTimeout(() => joinPanel.classList.add("hidden"), 450);
   } else if (message.type === "player-joined") {
@@ -286,23 +298,77 @@ addEventListener("keydown", (event) => {
   keys.add(event.key.toLowerCase());
 });
 addEventListener("keyup", (event) => keys.delete(event.key.toLowerCase()));
-addEventListener("blur", () => keys.clear());
+addEventListener("blur", () => {
+  keys.clear();
+  resetJoystick();
+});
+
+let joystickPointerId: number | null = null;
+
+movementJoystick.addEventListener("pointerdown", (event) => {
+  if (joystickPointerId !== null) return;
+  event.preventDefault();
+  joystickPointerId = event.pointerId;
+  movementJoystick.setPointerCapture(event.pointerId);
+  movementJoystick.classList.add("active");
+  updateJoystick(event);
+});
+
+movementJoystick.addEventListener("pointermove", (event) => {
+  if (event.pointerId !== joystickPointerId) return;
+  event.preventDefault();
+  updateJoystick(event);
+});
+
+movementJoystick.addEventListener("pointerup", finishJoystickPointer);
+movementJoystick.addEventListener("pointercancel", finishJoystickPointer);
+movementJoystick.addEventListener("lostpointercapture", (event) => {
+  if (event.pointerId === joystickPointerId) resetJoystick();
+});
+
+function updateJoystick(event: PointerEvent): void {
+  const bounds = movementJoystick.getBoundingClientRect();
+  const maxDistance = Math.max(1, (bounds.width - joystickKnob.offsetWidth) / 2);
+  let x = event.clientX - (bounds.left + bounds.width / 2);
+  let y = event.clientY - (bounds.top + bounds.height / 2);
+  const distance = Math.hypot(x, y);
+  if (distance > maxDistance) {
+    const scale = maxDistance / distance;
+    x *= scale;
+    y *= scale;
+  }
+  touchMovement.set(x / maxDistance, y / maxDistance);
+  joystickKnob.style.transform = `translate(${x}px, ${y}px)`;
+}
+
+function finishJoystickPointer(event: PointerEvent): void {
+  if (event.pointerId !== joystickPointerId) return;
+  if (movementJoystick.hasPointerCapture(event.pointerId)) movementJoystick.releasePointerCapture(event.pointerId);
+  resetJoystick();
+}
+
+function resetJoystick(): void {
+  joystickPointerId = null;
+  touchMovement.set(0, 0);
+  joystickKnob.style.transform = "translate(0, 0)";
+  movementJoystick.classList.remove("active");
+}
 
 function updateLocal(delta: number, now: number): void {
   const player = entities.get(localId);
   const data = playerData.get(localId);
   if (!player || !data?.alive || roundEnded) return;
-  const direction = new THREE.Vector3(
-    Number(keys.has("d") || keys.has("arrowright")) - Number(keys.has("a") || keys.has("arrowleft")),
+  movementDirection.set(
+    Number(keys.has("d") || keys.has("arrowright")) - Number(keys.has("a") || keys.has("arrowleft")) + touchMovement.x,
     0,
-    Number(keys.has("s") || keys.has("arrowdown")) - Number(keys.has("w") || keys.has("arrowup")),
+    Number(keys.has("s") || keys.has("arrowdown")) - Number(keys.has("w") || keys.has("arrowup")) + touchMovement.y,
   );
-  if (direction.lengthSq() > 0) {
-    direction.normalize();
-    player.root.position.addScaledVector(direction, MOVE_SPEED * delta);
+  if (movementDirection.lengthSq() > 0) {
+    if (movementDirection.lengthSq() > 1) movementDirection.normalize();
+    player.root.position.addScaledVector(movementDirection, MOVE_SPEED * delta);
     player.root.position.x = THREE.MathUtils.clamp(player.root.position.x, -WORLD_LIMIT + 0.6, WORLD_LIMIT - 0.6);
     player.root.position.z = THREE.MathUtils.clamp(player.root.position.z, -WORLD_LIMIT + 0.6, WORLD_LIMIT - 0.6);
-    player.root.rotation.y = Math.atan2(direction.x, direction.z);
+    player.root.rotation.y = Math.atan2(movementDirection.x, movementDirection.z);
   }
   if (now - lastSent >= 100 && player.root.position.distanceToSquared(lastPosition) > 0.0001 && socket?.connected) {
     sendMessage({ type: "move", sequence: ++sequence, x: player.root.position.x, z: player.root.position.z, rotationY: player.root.rotation.y });
@@ -350,6 +416,7 @@ function setStatus(kind: "connecting" | "connected" | "error", text: string): vo
 
 function showEliminated(score: number): void {
   keys.clear();
+  resetJoystick();
   document.querySelector("#result-icon")!.textContent = "×";
   document.querySelector("#result-eyebrow")!.textContent = "Projectile impact";
   document.querySelector("#result-title")!.textContent = "You were hit";
@@ -362,6 +429,7 @@ function showEliminated(score: number): void {
 
 function showWinner(title: string): void {
   keys.clear();
+  resetJoystick();
   document.querySelector("#result-icon")!.textContent = "◇";
   document.querySelector("#result-eyebrow")!.textContent = "10 drops collected";
   document.querySelector("#result-title")!.textContent = title;
